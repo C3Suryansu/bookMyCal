@@ -15,7 +15,7 @@ pytz==2024.1
 # Date/time parsing for natural language office hours input
 python-dateutil==2.9.0
 
-# HTTP client (used by anthropic SDK, included explicitly for clarity)
+# HTTP client (used by anthropic SDK and GitHub API calls)
 httpx>=0.27.0
 
 # Google Calendar API + OAuth
