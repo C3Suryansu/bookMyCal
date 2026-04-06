@@ -346,6 +346,20 @@ async def _resolve_repo(token: str, username: str, repo_hint: str) -> str:
     return repo_hint  # Return as-is if not found
 
 
+async def _list_branches(token: str, repo: str) -> list[str]:
+    """Return branch names for a repo. Used internally by github_create_pr."""
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(
+            f"{GITHUB_API_BASE}/repos/{repo}/branches",
+            headers=get_github_headers(token),
+            params={"per_page": 100},
+            timeout=10,
+        )
+        _raise_for_github_status(resp)
+        data = resp.json()
+    return [b.get("name", "") for b in data]
+
+
 # ---------------------------------------------------------------------------
 # Execution functions
 # ---------------------------------------------------------------------------
