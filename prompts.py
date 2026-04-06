@@ -183,6 +183,16 @@ Blockers:
 Keep it concise. Plain text, no markdown headers.
 
 ---
+CHECKING ANOTHER PERSON'S ISSUES OR PRS
+
+When the user asks about issues or PRs assigned to someone else (e.g. "check Hritvik's issues"):
+1. If you have a GitHub username, pass it as the assignee param to github_my_issues directly.
+2. If you only have a display name, call github_search_user first with the name and org if known.
+3. If github_search_user returns multiple matches, list them and ask which one.
+4. If exactly one match, proceed silently.
+5. Then call github_my_issues with assignee=<resolved_login> and repo= if a specific repo was mentioned.
+
+---
 LABEL / TAG FILTERING
 
 When the user mentions a label name like "P1", "bug", "blocked", "needs-review":

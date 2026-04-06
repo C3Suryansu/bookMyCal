@@ -91,8 +91,10 @@ GITHUB_TOOLS = [
     {
         "name": "github_my_issues",
         "description": (
-            "List issues assigned to or created by the user. Filterable by label. "
-            "Returns title, repo, labels, days open, priority."
+            "List issues assigned to or created by any GitHub user. "
+            "Defaults to the authenticated user. Pass assignee to check another person's issues "
+            "(useful for checking a teammate's workload in a shared repo). "
+            "Filterable by label and repo."
         ),
         "input_schema": {
             "type": "object",
@@ -100,6 +102,13 @@ GITHUB_TOOLS = [
                 "repo": {
                     "type": "string",
                     "description": "Filter to a specific repository in owner/repo format (optional).",
+                },
+                "assignee": {
+                    "type": "string",
+                    "description": (
+                        "GitHub username to check issues for. Omit to use the authenticated user. "
+                        "Use github_search_user first if you only have a display name."
+                    ),
                 },
                 "role": {
                     "type": "string",
@@ -116,6 +125,28 @@ GITHUB_TOOLS = [
                 },
             },
             "required": [],
+        },
+    },
+    {
+        "name": "github_search_user",
+        "description": (
+            "Search for a GitHub user by their display name or partial name, optionally within "
+            "a specific org. Returns matching GitHub logins. Use this before github_my_issues or "
+            "github_my_prs when the user gives a person's name instead of a GitHub username."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Display name or partial name to search for (e.g. 'Hritvik Mohan').",
+                },
+                "org": {
+                    "type": "string",
+                    "description": "Limit search to this GitHub org name (e.g. 'NewtonSchool'). Optional but recommended.",
+                },
+            },
+            "required": ["name"],
         },
     },
     {
@@ -323,13 +354,13 @@ async def _execute_github_my_prs(chat_id: int, repo: str = None, limit: int = 20
     """List authored PRs and review-requested PRs for the authenticated user."""
     token, username = await _get_github_username_and_token(chat_id)
 
-    authored_query = f"is:pr+is:open+author:{username}"
-    review_query = f"is:pr+is:open+review-requested:{username}"
+    authored_query = f"is:pr is:open author:@me"
+    review_query = f"is:pr is:open review-requested:@me"
 
     if repo:
         repo = await _resolve_repo(token, username, repo)
-        authored_query += f"+repo:{repo}"
-        review_query += f"+repo:{repo}"
+        authored_query += f" repo:{repo}"
+        review_query += f" repo:{repo}"
 
     async with httpx.AsyncClient() as client:
         # Fetch authored PRs
@@ -507,7 +538,7 @@ async def _execute_github_pr_review_requested(chat_id: int, limit: int = 10) -> 
         resp = await client.get(
             f"{GITHUB_API_BASE}/search/issues",
             headers=get_github_headers(token),
-            params={"q": f"is:pr+is:open+review-requested:{username}", "per_page": limit},
+            params={"q": f"is:pr is:open review-requested:@me", "per_page": limit},
             timeout=15,
         )
         _raise_for_github_status(resp)
@@ -517,25 +548,83 @@ async def _execute_github_pr_review_requested(chat_id: int, limit: int = 10) -> 
     return {"prs": prs}
 
 
+async def _execute_github_search_user(
+    chat_id: int,
+    name: str,
+    org: str = None,
+) -> dict:
+    """Search for a GitHub user by display name, optionally scoped to an org."""
+    token, _username = await _get_github_username_and_token(chat_id)
+
+    results = []
+
+    # Strategy 1: GitHub user search (finds public profiles by name)
+    query = name
+    if org:
+        query += f" org:{org}"
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(
+            f"{GITHUB_API_BASE}/search/users",
+            headers=get_github_headers(token),
+            params={"q": query, "per_page": 10},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            for item in data.get("items", []):
+                results.append({
+                    "login": item.get("login", ""),
+                    "name": item.get("name") or "",
+                    "avatar_url": item.get("avatar_url", ""),
+                })
+
+        # Strategy 2: If org given, also list org members and fuzzy-match by login/name
+        if org and not results:
+            members_resp = await client.get(
+                f"{GITHUB_API_BASE}/orgs/{org}/members",
+                headers=get_github_headers(token),
+                params={"per_page": 100},
+                timeout=10,
+            )
+            if members_resp.status_code == 200:
+                name_lower = name.lower()
+                for member in members_resp.json():
+                    login = member.get("login", "")
+                    if name_lower in login.lower():
+                        results.append({"login": login, "name": ""})
+
+    if not results:
+        return {"matches": [], "message": f"No GitHub users found matching '{name}'."}
+
+    return {"matches": results}
+
+
 async def _execute_github_my_issues(
     chat_id: int,
     repo: str = None,
+    assignee: str = None,
     role: str = "assigned",
     label: str = None,
     limit: int = 20,
 ) -> dict:
-    """List issues assigned to or created by the authenticated user."""
+    """List issues assigned to or created by a GitHub user (defaults to authenticated user)."""
     token, username = await _get_github_username_and_token(chat_id)
 
-    # Build search query
+    # Use @me for the authenticated user (avoids username casing issues),
+    # or use the provided assignee login directly.
+    target_user = assignee if assignee else "@me"
+
+    # Build search query — use spaces as separators (not +), httpx will encode
+    # spaces correctly as %20, which GitHub Search API reliably interprets.
     query_parts = ["is:issue", "is:open"]
 
     if role == "assigned":
-        query_parts.append(f"assignee:{username}")
+        query_parts.append(f"assignee:{target_user}")
     elif role == "created":
-        query_parts.append(f"author:{username}")
+        query_parts.append(f"author:{target_user}")
     else:  # "both"
-        query_parts.append(f"involves:{username}")
+        query_parts.append(f"involves:{target_user}")
 
     if label:
         query_parts.append(f'label:"{label}"')
@@ -544,7 +633,7 @@ async def _execute_github_my_issues(
         repo = await _resolve_repo(token, username, repo)
         query_parts.append(f"repo:{repo}")
 
-    query = "+".join(query_parts)
+    query = " ".join(query_parts)
 
     async with httpx.AsyncClient() as client:
         resp = await client.get(
@@ -683,11 +772,11 @@ async def _execute_github_recent_activity(
     repo_filter = ""
     if repo:
         repo = await _resolve_repo(token, username, repo)
-        repo_filter = f"+repo:{repo}"
+        repo_filter = f" repo:{repo}"
 
-    merged_query = f"is:pr+is:merged+author:{username}+merged:>{since_date}{repo_filter}"
-    closed_query = f"is:issue+is:closed+assignee:{username}+closed:>{since_date}{repo_filter}"
-    reviewed_query = f"is:pr+is:open+reviewed-by:{username}+updated:>{since_date}{repo_filter}"
+    merged_query = f"is:pr is:merged author:@me merged:>{since_date}{repo_filter}"
+    closed_query = f"is:issue is:closed assignee:@me closed:>{since_date}{repo_filter}"
+    reviewed_query = f"is:pr is:open reviewed-by:@me updated:>{since_date}{repo_filter}"
 
     async with httpx.AsyncClient() as client:
         merged_resp = await client.get(
@@ -761,9 +850,16 @@ async def dispatch_github_tool(chat_id: int, tool_name: str, tool_input: dict) -
             result = await _execute_github_my_issues(
                 chat_id,
                 repo=tool_input.get("repo"),
+                assignee=tool_input.get("assignee"),
                 role=tool_input.get("role", "assigned"),
                 label=tool_input.get("label"),
                 limit=tool_input.get("limit", 20),
+            )
+        elif tool_name == "github_search_user":
+            result = await _execute_github_search_user(
+                chat_id,
+                name=tool_input["name"],
+                org=tool_input.get("org"),
             )
         elif tool_name == "github_issue_detail":
             result = await _execute_github_issue_detail(
