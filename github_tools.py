@@ -8,6 +8,7 @@ All API responses are compressed before returning to Claude to keep token usage 
 import json
 import logging
 from datetime import datetime, timedelta, timezone
+from urllib.parse import quote
 
 import httpx
 
@@ -263,6 +264,169 @@ GITHUB_TOOLS = [
                 },
             },
             "required": ["repo", "title"],
+        },
+    },
+    {
+        "name": "github_pr_submit_review",
+        "description": (
+            "Submit a review on a pull request: approve, request changes, or leave a comment review. "
+            "Executes immediately — no confirmation needed. Body is required when event=REQUEST_CHANGES."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "repo": {
+                    "type": "string",
+                    "description": "Repository in owner/repo format.",
+                },
+                "pr_number": {
+                    "type": "integer",
+                    "description": "The pull request number.",
+                },
+                "event": {
+                    "type": "string",
+                    "enum": ["APPROVE", "REQUEST_CHANGES", "COMMENT"],
+                    "description": "Review action to take.",
+                },
+                "body": {
+                    "type": "string",
+                    "description": "Review body. Required when event=REQUEST_CHANGES.",
+                },
+            },
+            "required": ["repo", "pr_number", "event"],
+        },
+    },
+    {
+        "name": "github_pr_comment",
+        "description": (
+            "Add a comment to a pull request's issue thread. Executes immediately."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "repo": {
+                    "type": "string",
+                    "description": "Repository in owner/repo format.",
+                },
+                "pr_number": {
+                    "type": "integer",
+                    "description": "The pull request number.",
+                },
+                "body": {
+                    "type": "string",
+                    "description": "Comment text.",
+                },
+            },
+            "required": ["repo", "pr_number", "body"],
+        },
+    },
+    {
+        "name": "github_pr_merge",
+        "description": (
+            "Merge a pull request. ALWAYS ask the user first: "
+            "'Merge `{repo}#{pr_number}` via {method}? (yes/no)' — only call this tool after confirmation. "
+            "Replies with the merge SHA on success."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "repo": {
+                    "type": "string",
+                    "description": "Repository in owner/repo format.",
+                },
+                "pr_number": {
+                    "type": "integer",
+                    "description": "The pull request number.",
+                },
+                "merge_method": {
+                    "type": "string",
+                    "enum": ["merge", "squash", "rebase"],
+                    "description": "Merge strategy. Default: squash.",
+                },
+            },
+            "required": ["repo", "pr_number"],
+        },
+    },
+    {
+        "name": "github_pr_close",
+        "description": (
+            "Close a pull request without merging. "
+            "ALWAYS ask the user first: 'Close `{repo}#{pr_number}` without merging? (yes/no)' "
+            "— only call this tool after confirmation."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "repo": {
+                    "type": "string",
+                    "description": "Repository in owner/repo format.",
+                },
+                "pr_number": {
+                    "type": "integer",
+                    "description": "The pull request number.",
+                },
+            },
+            "required": ["repo", "pr_number"],
+        },
+    },
+    {
+        "name": "github_pr_request_reviewers",
+        "description": (
+            "Request reviews from one or more GitHub users on a pull request. "
+            "Executes immediately. If the user gives display names instead of GitHub logins, "
+            "call github_search_user first. Confirm after: 'Requested review from @alice and @bob.'"
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "repo": {
+                    "type": "string",
+                    "description": "Repository in owner/repo format.",
+                },
+                "pr_number": {
+                    "type": "integer",
+                    "description": "The pull request number.",
+                },
+                "reviewers": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of GitHub logins to request reviews from.",
+                },
+            },
+            "required": ["repo", "pr_number", "reviewers"],
+        },
+    },
+    {
+        "name": "github_pr_set_labels",
+        "description": (
+            "Add or remove labels on a pull request. Executes immediately. "
+            "If unsure of exact label names, call github_repo_labels first. "
+            "Confirm after: 'Added \\'needs-review\\', removed \\'WIP\\'.' "
+            "At least one of add or remove must be provided."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "repo": {
+                    "type": "string",
+                    "description": "Repository in owner/repo format.",
+                },
+                "pr_number": {
+                    "type": "integer",
+                    "description": "The pull request number.",
+                },
+                "add": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Label names to add (optional).",
+                },
+                "remove": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Label names to remove (optional).",
+                },
+            },
+            "required": ["repo", "pr_number"],
         },
     },
 ]
@@ -910,6 +1074,195 @@ async def _execute_github_create_pr(
     }
 
 
+async def _execute_github_pr_submit_review(
+    chat_id: int,
+    repo: str,
+    pr_number: int,
+    event: str,
+    body: str = "",
+) -> dict:
+    """Submit a review on a PR (APPROVE, REQUEST_CHANGES, or COMMENT)."""
+    token, username = await _get_github_username_and_token(chat_id)
+    repo = await _resolve_repo(token, username, repo)
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            f"{GITHUB_API_BASE}/repos/{repo}/pulls/{pr_number}/reviews",
+            headers=get_github_headers(token),
+            json={"event": event, "body": body},
+            timeout=15,
+        )
+        _raise_for_github_status(resp)
+        data = resp.json()
+
+    return {
+        "id": data.get("id"),
+        "state": data.get("state", ""),
+        "pr_number": pr_number,
+        "repo": repo,
+    }
+
+
+async def _execute_github_pr_comment(
+    chat_id: int,
+    repo: str,
+    pr_number: int,
+    body: str,
+) -> dict:
+    """Add a comment to a PR's issue thread."""
+    token, username = await _get_github_username_and_token(chat_id)
+    repo = await _resolve_repo(token, username, repo)
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            f"{GITHUB_API_BASE}/repos/{repo}/issues/{pr_number}/comments",
+            headers=get_github_headers(token),
+            json={"body": body},
+            timeout=15,
+        )
+        _raise_for_github_status(resp)
+        data = resp.json()
+
+    return {
+        "id": data.get("id"),
+        "url": data.get("html_url", ""),
+        "pr_number": pr_number,
+        "repo": repo,
+    }
+
+
+async def _execute_github_pr_merge(
+    chat_id: int,
+    repo: str,
+    pr_number: int,
+    merge_method: str = "squash",
+) -> dict:
+    """Merge a PR. Caller (Claude) must have confirmed with the user before calling."""
+    token, username = await _get_github_username_and_token(chat_id)
+    repo = await _resolve_repo(token, username, repo)
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.put(
+            f"{GITHUB_API_BASE}/repos/{repo}/pulls/{pr_number}/merge",
+            headers=get_github_headers(token),
+            json={"merge_method": merge_method},
+            timeout=15,
+        )
+        if resp.status_code == 422:
+            raise RuntimeError("Can't merge — there are conflicts or CI is failing.")
+        _raise_for_github_status(resp)
+        data = resp.json()
+
+    return {
+        "merged": data.get("merged", False),
+        "sha": data.get("sha", ""),
+        "message": data.get("message", ""),
+        "pr_number": pr_number,
+        "repo": repo,
+    }
+
+
+async def _execute_github_pr_close(
+    chat_id: int,
+    repo: str,
+    pr_number: int,
+) -> dict:
+    """Close a PR without merging. Caller (Claude) must have confirmed with the user."""
+    token, username = await _get_github_username_and_token(chat_id)
+    repo = await _resolve_repo(token, username, repo)
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.patch(
+            f"{GITHUB_API_BASE}/repos/{repo}/pulls/{pr_number}",
+            headers=get_github_headers(token),
+            json={"state": "closed"},
+            timeout=15,
+        )
+        _raise_for_github_status(resp)
+        data = resp.json()
+
+    return {
+        "number": data.get("number"),
+        "state": data.get("state", ""),
+        "url": data.get("html_url", ""),
+        "repo": repo,
+    }
+
+
+async def _execute_github_pr_request_reviewers(
+    chat_id: int,
+    repo: str,
+    pr_number: int,
+    reviewers: list[str],
+) -> dict:
+    """Request reviews from a list of GitHub logins."""
+    token, username = await _get_github_username_and_token(chat_id)
+    repo = await _resolve_repo(token, username, repo)
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            f"{GITHUB_API_BASE}/repos/{repo}/pulls/{pr_number}/requested_reviewers",
+            headers=get_github_headers(token),
+            json={"reviewers": reviewers},
+            timeout=15,
+        )
+        if resp.status_code == 404:
+            raise RuntimeError("Couldn't add reviewer — check they're a repo collaborator.")
+        _raise_for_github_status(resp)
+        data = resp.json()
+
+    requested = [r.get("login", "") for r in data.get("requested_reviewers", [])]
+    return {
+        "pr_number": pr_number,
+        "repo": repo,
+        "requested_reviewers": requested,
+    }
+
+
+async def _execute_github_pr_set_labels(
+    chat_id: int,
+    repo: str,
+    pr_number: int,
+    add: list[str] = None,
+    remove: list[str] = None,
+) -> dict:
+    """Add and/or remove labels on a PR. 404 on remove is silently ignored."""
+    token, username = await _get_github_username_and_token(chat_id)
+    repo = await _resolve_repo(token, username, repo)
+
+    added: list[str] = []
+    removed: list[str] = []
+
+    async with httpx.AsyncClient() as client:
+        if add:
+            resp = await client.post(
+                f"{GITHUB_API_BASE}/repos/{repo}/issues/{pr_number}/labels",
+                headers=get_github_headers(token),
+                json={"labels": add},
+                timeout=15,
+            )
+            _raise_for_github_status(resp)
+            added = add[:]
+
+        for label in (remove or []):
+            resp = await client.delete(
+                f"{GITHUB_API_BASE}/repos/{repo}/issues/{pr_number}/labels/{quote(label, safe='')}",
+                headers=get_github_headers(token),
+                timeout=15,
+            )
+            if resp.status_code == 404:
+                continue  # Label wasn't on the PR — not an error
+            _raise_for_github_status(resp)
+            removed.append(label)
+
+    return {
+        "pr_number": pr_number,
+        "repo": repo,
+        "added": added,
+        "removed": removed,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Dispatcher
 # ---------------------------------------------------------------------------
@@ -984,6 +1337,49 @@ async def dispatch_github_tool(chat_id: int, tool_name: str, tool_input: dict) -
                 base=tool_input.get("base", "main"),
                 body=tool_input.get("body", ""),
                 draft=tool_input.get("draft", False),
+            )
+        elif tool_name == "github_pr_submit_review":
+            result = await _execute_github_pr_submit_review(
+                chat_id,
+                repo=tool_input["repo"],
+                pr_number=tool_input["pr_number"],
+                event=tool_input["event"],
+                body=tool_input.get("body", ""),
+            )
+        elif tool_name == "github_pr_comment":
+            result = await _execute_github_pr_comment(
+                chat_id,
+                repo=tool_input["repo"],
+                pr_number=tool_input["pr_number"],
+                body=tool_input["body"],
+            )
+        elif tool_name == "github_pr_merge":
+            result = await _execute_github_pr_merge(
+                chat_id,
+                repo=tool_input["repo"],
+                pr_number=tool_input["pr_number"],
+                merge_method=tool_input.get("merge_method", "squash"),
+            )
+        elif tool_name == "github_pr_close":
+            result = await _execute_github_pr_close(
+                chat_id,
+                repo=tool_input["repo"],
+                pr_number=tool_input["pr_number"],
+            )
+        elif tool_name == "github_pr_request_reviewers":
+            result = await _execute_github_pr_request_reviewers(
+                chat_id,
+                repo=tool_input["repo"],
+                pr_number=tool_input["pr_number"],
+                reviewers=tool_input["reviewers"],
+            )
+        elif tool_name == "github_pr_set_labels":
+            result = await _execute_github_pr_set_labels(
+                chat_id,
+                repo=tool_input["repo"],
+                pr_number=tool_input["pr_number"],
+                add=tool_input.get("add"),
+                remove=tool_input.get("remove"),
             )
         else:
             result = {"error": f"Unknown GitHub tool: {tool_name}"}
