@@ -226,6 +226,45 @@ GITHUB_TOOLS = [
             "required": [],
         },
     },
+    {
+        "name": "github_create_pr",
+        "description": (
+            "Create a new pull request. If head branch is not provided, call this tool without "
+            "head and the response will include available branches to ask the user. "
+            "Gather title conversationally if not given. Always confirm before creating: "
+            "'Creating PR \\'[title]\\' from [head] → [base]. Ready to open? (yes/no)'"
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "repo": {
+                    "type": "string",
+                    "description": "Repository in owner/repo format.",
+                },
+                "head": {
+                    "type": "string",
+                    "description": "The branch containing the changes.",
+                },
+                "base": {
+                    "type": "string",
+                    "description": "The branch to merge into. Default: main.",
+                },
+                "title": {
+                    "type": "string",
+                    "description": "PR title.",
+                },
+                "body": {
+                    "type": "string",
+                    "description": "PR description (optional).",
+                },
+                "draft": {
+                    "type": "boolean",
+                    "description": "Whether to open as a draft PR. Default false.",
+                },
+            },
+            "required": ["repo", "title"],
+        },
+    },
 ]
 
 
@@ -832,6 +871,45 @@ async def _execute_github_recent_activity(
     }
 
 
+async def _execute_github_create_pr(
+    chat_id: int,
+    repo: str,
+    title: str,
+    head: str = "",
+    base: str = "main",
+    body: str = "",
+    draft: bool = False,
+) -> dict:
+    """Create a pull request. If head is empty, returns available branches for user to pick."""
+    token, username = await _get_github_username_and_token(chat_id)
+    repo = await _resolve_repo(token, username, repo)
+
+    if not head:
+        branches = await _list_branches(token, repo)
+        return {"needs_branch_selection": True, "branches": branches}
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            f"{GITHUB_API_BASE}/repos/{repo}/pulls",
+            headers=get_github_headers(token),
+            json={"title": title, "head": head, "base": base, "body": body, "draft": draft},
+            timeout=15,
+        )
+        if resp.status_code == 422:
+            raise RuntimeError("A PR for this branch already exists.")
+        _raise_for_github_status(resp)
+        data = resp.json()
+
+    return {
+        "number": data.get("number"),
+        "title": data.get("title", ""),
+        "url": data.get("html_url", ""),
+        "head": head,
+        "base": base,
+        "draft": draft,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Dispatcher
 # ---------------------------------------------------------------------------
@@ -896,6 +974,16 @@ async def dispatch_github_tool(chat_id: int, tool_name: str, tool_input: dict) -
                 chat_id,
                 days=tool_input.get("days", 1),
                 repo=tool_input.get("repo"),
+            )
+        elif tool_name == "github_create_pr":
+            result = await _execute_github_create_pr(
+                chat_id,
+                repo=tool_input["repo"],
+                title=tool_input.get("title", ""),
+                head=tool_input.get("head", ""),
+                base=tool_input.get("base", "main"),
+                body=tool_input.get("body", ""),
+                draft=tool_input.get("draft", False),
             )
         else:
             result = {"error": f"Unknown GitHub tool: {tool_name}"}
