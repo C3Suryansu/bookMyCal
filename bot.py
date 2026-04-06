@@ -6,13 +6,15 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 from agent import run_agent_turn
-from onboarding import handle_onboarding_step, trigger_google_auth
+from onboarding import handle_onboarding_step, trigger_github_setup, trigger_google_auth
 from prompts import MSG_ONBOARDING_START, MSG_READY
 from session import (
     BOOKED,
     IDLE,
+    ONBOARDING_GITHUB_PAT,
     get_session,
     reset_booking_ctx,
+    reset_github_ctx,
     reset_session,
     save_session,
 )
@@ -91,6 +93,28 @@ async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("Booking context cleared. " + MSG_READY)
 
 
+async def cmd_github(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Connect or reconnect a GitHub Personal Access Token."""
+    chat_id = update.effective_chat.id
+    session = get_session(chat_id)
+
+    if session["ctx"].get("github_authed"):
+        username = session["ctx"].get("github_username", "unknown")
+        # If already in the middle of re-auth flow, don't double-trigger
+        if session["state"] == ONBOARDING_GITHUB_PAT:
+            await update.message.reply_text(
+                f"Already waiting for your GitHub token. Paste it now, or type /start to cancel."
+            )
+            return
+        # Second /github call = re-auth: clear existing auth and start fresh
+        reset_github_ctx(session)
+        save_session(chat_id, session)
+
+    reply = await trigger_github_setup(chat_id, session)
+    save_session(chat_id, session)
+    await update.message.reply_text(reply)
+
+
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     session = get_session(chat_id)
@@ -102,6 +126,8 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         f"Office hours: {ctx['office_hours']['start']} - {ctx['office_hours']['end']} IST",
         f"Working days: {', '.join(ctx.get('working_days') or [])}",
         f"Google authed: {ctx.get('google_authed', False)}",
+        f"GitHub authed: {ctx.get('github_authed', False)}",
+        f"GitHub user: {ctx.get('github_username') or 'not set'}",
         f"Attendee: {ctx.get('attendee_email') or 'none'}",
         f"Date: {ctx.get('date') or 'none'}",
         f"Duration: {ctx.get('duration_mins') or 'none'} mins",
@@ -121,6 +147,7 @@ def main() -> None:
     app.add_handler(CommandHandler("reauth", cmd_reauth))
     app.add_handler(CommandHandler("reset", cmd_reset))
     app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("github", cmd_github))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     logger.info("Bot started. Polling for messages...")

@@ -9,6 +9,7 @@ ONBOARDING_OFFICE_HOURS = "ONBOARDING_OFFICE_HOURS"
 ONBOARDING_WORKING_DAYS = "ONBOARDING_WORKING_DAYS"
 ONBOARDING_COMPLETE = "ONBOARDING_COMPLETE"
 ONBOARDING_GOOGLE_CODE = "ONBOARDING_GOOGLE_CODE"
+ONBOARDING_GITHUB_PAT = "ONBOARDING_GITHUB_PAT"
 IDLE = "IDLE"
 SEARCHING = "SEARCHING"
 AWAITING_CHOICE = "AWAITING_CHOICE"
@@ -48,13 +49,32 @@ def _new_session() -> dict:
             "chosen_slot": None,
             "delta_tried": [],
             "google_authed": fully_configured,
+            "github_token": os.getenv("GITHUB_TOKEN"),
+            "github_username": os.getenv("GITHUB_USERNAME"),
+            "github_authed": bool(os.getenv("GITHUB_TOKEN")),
+            "github_default_repos": [],
         },
     }
 
 
 def get_session(chat_id: int) -> dict:
     if chat_id not in _sessions:
-        _sessions[chat_id] = _new_session()
+        session = _new_session()
+        # Load persisted GitHub token if env var is not set
+        if not os.getenv("GITHUB_TOKEN"):
+            token_file = os.path.join(
+                os.path.dirname(__file__), ".github_tokens", f"{chat_id}.txt"
+            )
+            if os.path.exists(token_file):
+                try:
+                    with open(token_file) as f:
+                        saved_token = f.read().strip()
+                    if saved_token:
+                        session["ctx"]["github_token"] = saved_token
+                        session["ctx"]["github_authed"] = True
+                except Exception:
+                    pass
+        _sessions[chat_id] = session
     return _sessions[chat_id]
 
 
@@ -78,6 +98,15 @@ def reset_booking_ctx(session: dict) -> None:
     ctx["chosen_slot"] = None
     ctx["delta_tried"] = []
     session["state"] = IDLE
+
+
+def reset_github_ctx(session: dict) -> None:
+    """Clear GitHub auth fields."""
+    ctx = session["ctx"]
+    ctx["github_token"] = None
+    ctx["github_username"] = None
+    ctx["github_authed"] = False
+    ctx["github_default_repos"] = []
 
 
 def append_message(session: dict, role: str, content) -> None:

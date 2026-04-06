@@ -2,11 +2,12 @@ import logging
 import os
 
 import anthropic
+import httpx
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 
 from calendar_utils import parse_office_hours, parse_working_days
-from config import DEFAULT_WORKING_DAYS
+from config import DEFAULT_WORKING_DAYS, GITHUB_TOKEN_DIR
 from prompts import (
     MSG_ASK_EMAIL,
     MSG_ASK_OFFICE_HOURS,
@@ -18,6 +19,7 @@ from session import (
     ONBOARDING_API_KEY,
     ONBOARDING_COMPLETE,
     ONBOARDING_EMAIL,
+    ONBOARDING_GITHUB_PAT,
     ONBOARDING_GOOGLE_CODE,
     ONBOARDING_OFFICE_HOURS,
     ONBOARDING_WORKING_DAYS,
@@ -25,6 +27,73 @@ from session import (
 )
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# GitHub token persistence helpers
+# ---------------------------------------------------------------------------
+
+def _github_token_path(chat_id: int) -> str:
+    """Return the file path where a user's GitHub PAT is stored."""
+    os.makedirs(GITHUB_TOKEN_DIR, exist_ok=True)
+    return os.path.join(GITHUB_TOKEN_DIR, f"{chat_id}.txt")
+
+
+def load_github_token(chat_id: int) -> str | None:
+    """Read a persisted GitHub PAT from disk. Returns None if not found."""
+    path = _github_token_path(chat_id)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path) as f:
+            token = f.read().strip()
+        return token if token else None
+    except Exception as exc:
+        logger.warning("Could not load GitHub token for %s: %s", chat_id, exc)
+        return None
+
+
+async def _validate_github_token(token: str) -> tuple[bool, str]:
+    """
+    Validate a GitHub Personal Access Token by calling GET /user.
+    Returns (True, username) on success or (False, "") on failure.
+    """
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                "https://api.github.com/user",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Accept": "application/vnd.github+json",
+                    "X-GitHub-Api-Version": "2022-11-28",
+                },
+                timeout=10,
+            )
+        if resp.status_code == 200:
+            username = resp.json().get("login", "")
+            return True, username
+        return False, ""
+    except Exception as exc:
+        logger.warning("GitHub token validation error: %s", exc)
+        return False, ""
+
+
+async def trigger_github_setup(chat_id: int, session: dict) -> str:
+    """
+    Set the session state to ONBOARDING_GITHUB_PAT and return instructions
+    asking the user to paste their Personal Access Token.
+    """
+    session["state"] = ONBOARDING_GITHUB_PAT
+    return (
+        "To connect GitHub, paste your Personal Access Token (PAT) here.\n\n"
+        "Create one at: https://github.com/settings/tokens/new\n\n"
+        "Required scopes:\n"
+        "  - repo (full repository access)\n"
+        "  - read:org (read org membership)\n"
+        "  - read:user (read user profile)\n\n"
+        "The token starts with ghp_ or github_pat_.\n"
+        "Paste it now:"
+    )
+
 
 GOOGLE_SCOPES = [
     "https://www.googleapis.com/auth/calendar",
@@ -170,6 +239,30 @@ async def handle_onboarding_step(session: dict, user_text: str, chat_id: int) ->
     elif state == ONBOARDING_COMPLETE:
         # User sent a message while we're still in COMPLETE — re-trigger auth
         return await trigger_google_auth(chat_id, session)
+
+    elif state == ONBOARDING_GITHUB_PAT:
+        token = user_text.strip()
+        valid, github_username = await _validate_github_token(token)
+        if not valid:
+            return (
+                "That token didn't work. Make sure it has repo, read:org, and read:user scopes.\n"
+                "Try again or type /start to restart."
+            )
+        # Persist token to disk
+        token_path = _github_token_path(chat_id)
+        try:
+            with open(token_path, "w") as f:
+                f.write(token)
+        except Exception as exc:
+            logger.error("Could not save GitHub token for %s: %s", chat_id, exc)
+
+        # Update session
+        session["ctx"]["github_token"] = token
+        session["ctx"]["github_username"] = github_username
+        session["ctx"]["github_authed"] = True
+        session["state"] = IDLE
+        save_session(chat_id, session)
+        return f"GitHub connected as @{github_username}. Ready."
 
     return "Something went wrong. Type /start to begin again."
 

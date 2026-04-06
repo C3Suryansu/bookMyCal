@@ -9,3 +9,8 @@ MAX_DAYS_TO_SCAN_FORWARD = 5  # how many days ahead to check if current day has 
 SLOT_GRANULARITY_MINUTES = 15  # free slot grid resolution
 
 ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-opus-4-5")
+
+GITHUB_API_BASE = "https://api.github.com"
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+GITHUB_USERNAME = os.getenv("GITHUB_USERNAME")
+GITHUB_TOKEN_DIR = os.path.join(os.path.dirname(__file__), ".github_tokens")

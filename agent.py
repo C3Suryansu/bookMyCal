@@ -7,6 +7,7 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 from config import ANTHROPIC_MODEL
+from github_tools import GITHUB_TOOLS, dispatch_github_tool
 from onboarding import load_credentials
 from prompts import SYSTEM_PROMPT
 from session import (
@@ -328,8 +329,12 @@ def _execute_create_event(
     }
 
 
-def _dispatch_tool(chat_id: int, tool_name: str, tool_input: dict) -> str:
+async def _dispatch_tool(chat_id: int, tool_name: str, tool_input: dict) -> str:
     """Execute a tool call and return the result as a JSON string."""
+    # Route GitHub tools to their own dispatcher
+    if tool_name.startswith("github_"):
+        return await dispatch_github_tool(chat_id, tool_name, tool_input)
+
     try:
         if tool_name == "lookup_person":
             result = _execute_lookup_person(chat_id, tool_input["name"])
@@ -421,13 +426,30 @@ async def run_agent_turn(session: dict, user_message: str, chat_id: int) -> str:
     now_ist = datetime.now(timezone.utc).astimezone(
         __import__("pytz").timezone("Asia/Kolkata")
     )
+
+    # Build GitHub context lines
+    github_lines = []
+    github_authed = ctx.get("github_authed", False)
+    github_lines.append(f"GitHub authed: {github_authed}")
+    if github_authed:
+        github_username = ctx.get("github_username")
+        if github_username:
+            github_lines.append(f"GitHub username: {github_username}")
+        default_repos = ctx.get("github_default_repos", [])
+        if default_repos:
+            repos_preview = ", ".join(default_repos[:5])
+            github_lines.append(f"Cached repos (first 5): {repos_preview}")
+
     context_note = (
         f"\n\nCURRENT USER CONTEXT:\n"
         f"Org email: {ctx.get('org_email', 'unknown')}\n"
         f"Office hours: {ctx['office_hours']['start']} - {ctx['office_hours']['end']} IST\n"
         f"Working days: {', '.join(ctx.get('working_days', []))}\n"
         f"Current date/time (IST): {now_ist.strftime('%Y-%m-%d %H:%M %Z, %A')}\n"
+        + "\n".join(github_lines) + "\n"
     )
+
+    ALL_TOOLS = CALENDAR_TOOLS + GITHUB_TOOLS
 
     try:
         response = await client.messages.create(
@@ -435,7 +457,7 @@ async def run_agent_turn(session: dict, user_message: str, chat_id: int) -> str:
             max_tokens=1024,
             system=SYSTEM_PROMPT + context_note,
             messages=session["messages"],
-            tools=CALENDAR_TOOLS,
+            tools=ALL_TOOLS,
         )
 
         # Tool use loop
@@ -445,7 +467,7 @@ async def run_agent_turn(session: dict, user_message: str, chat_id: int) -> str:
             for block in response.content:
                 if hasattr(block, "type") and block.type == "tool_use":
                     logger.info("Tool call: %s input=%s", block.name, block.input)
-                    result_json = _dispatch_tool(chat_id, block.name, block.input)
+                    result_json = await _dispatch_tool(chat_id, block.name, block.input)
                     tool_results.append({
                         "type": "tool_result",
                         "tool_use_id": block.id,
@@ -461,7 +483,7 @@ async def run_agent_turn(session: dict, user_message: str, chat_id: int) -> str:
                 max_tokens=1024,
                 system=SYSTEM_PROMPT + context_note,
                 messages=session["messages"],
-                tools=CALENDAR_TOOLS,
+                tools=ALL_TOOLS,
             )
 
         reply_text = extract_text_reply(response)
