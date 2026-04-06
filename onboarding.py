@@ -1,0 +1,202 @@
+import logging
+import os
+
+import anthropic
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import Flow
+
+from calendar_utils import parse_office_hours, parse_working_days
+from config import DEFAULT_WORKING_DAYS
+from prompts import (
+    MSG_ASK_EMAIL,
+    MSG_ASK_OFFICE_HOURS,
+    MSG_ASK_WORKING_DAYS,
+    MSG_READY,
+)
+from session import (
+    IDLE,
+    ONBOARDING_API_KEY,
+    ONBOARDING_COMPLETE,
+    ONBOARDING_EMAIL,
+    ONBOARDING_GOOGLE_CODE,
+    ONBOARDING_OFFICE_HOURS,
+    ONBOARDING_WORKING_DAYS,
+    save_session,
+)
+
+logger = logging.getLogger(__name__)
+
+GOOGLE_SCOPES = [
+    "https://www.googleapis.com/auth/calendar",
+    "https://www.googleapis.com/auth/calendar.events",
+    "https://www.googleapis.com/auth/directory.readonly",       # org directory lookup
+    "https://www.googleapis.com/auth/contacts.readonly",        # saved contacts
+    "https://www.googleapis.com/auth/contacts.other.readonly",  # people you've emailed/met
+]
+CREDENTIALS_FILE = os.path.join(os.path.dirname(__file__), "credentials.json")
+TOKEN_DIR = os.path.join(os.path.dirname(__file__), ".google_tokens")
+
+# Holds the active OAuth Flow per chat_id while awaiting the code
+_pending_flows: dict[int, Flow] = {}
+
+
+def _token_path(chat_id: int) -> str:
+    os.makedirs(TOKEN_DIR, exist_ok=True)
+    return os.path.join(TOKEN_DIR, f"{chat_id}.json")
+
+
+async def _validate_api_key(api_key: str) -> bool:
+    """Make a minimal test API call to validate the key."""
+    try:
+        client = anthropic.AsyncAnthropic(api_key=api_key)
+        await client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=1,
+            messages=[{"role": "user", "content": "hi"}],
+        )
+        return True
+    except anthropic.AuthenticationError:
+        return False
+    except Exception as exc:
+        logger.warning("API key validation error: %s", exc)
+        return False
+
+
+def _build_auth_url(chat_id: int) -> str:
+    """Create a Google OAuth flow and return the authorization URL."""
+    if not os.path.exists(CREDENTIALS_FILE):
+        raise FileNotFoundError(
+            f"credentials.json not found at {CREDENTIALS_FILE}. "
+            "Download it from Google Cloud Console (OAuth 2.0 Desktop client)."
+        )
+    flow = Flow.from_client_secrets_file(
+        CREDENTIALS_FILE,
+        scopes=GOOGLE_SCOPES,
+        redirect_uri="urn:ietf:wg:oauth:2.0:oob",  # out-of-band: user gets a code to paste
+    )
+    auth_url, _ = flow.authorization_url(
+        access_type="offline",
+        prompt="consent",
+        include_granted_scopes="true",
+    )
+    _pending_flows[chat_id] = flow
+    return auth_url
+
+
+def _exchange_code(chat_id: int, code: str) -> Credentials:
+    """Exchange the authorization code for credentials and save them."""
+    flow = _pending_flows.get(chat_id)
+    if not flow:
+        raise ValueError("No pending OAuth flow found. Please type /start to begin again.")
+    flow.fetch_token(code=code.strip())
+    creds = flow.credentials
+    with open(_token_path(chat_id), "w") as f:
+        f.write(creds.to_json())
+    del _pending_flows[chat_id]
+    return creds
+
+
+def load_credentials(chat_id: int) -> Credentials | None:
+    """Load saved Google credentials for a chat_id, or None if not found."""
+    path = _token_path(chat_id)
+    if not os.path.exists(path):
+        return None
+    try:
+        return Credentials.from_authorized_user_file(path, GOOGLE_SCOPES)
+    except Exception as exc:
+        logger.warning("Could not load credentials for %s: %s", chat_id, exc)
+        return None
+
+
+async def handle_onboarding_step(session: dict, user_text: str, chat_id: int) -> str:
+    """
+    Route the user's message through the onboarding FSM.
+    Mutates session state in place.
+    Returns the reply string to send to Telegram.
+    """
+    state = session["state"]
+
+    if state == ONBOARDING_API_KEY:
+        api_key = user_text.strip()
+        valid = await _validate_api_key(api_key)
+        if not valid:
+            return "That key did not work. Please send a valid Anthropic API key (starts with sk-ant-)."
+        session["ctx"]["anthropic_api_key"] = api_key
+        session["state"] = ONBOARDING_EMAIL
+        return MSG_ASK_EMAIL
+
+    elif state == ONBOARDING_EMAIL:
+        email = user_text.strip()
+        session["ctx"]["org_email"] = email
+        session["state"] = ONBOARDING_OFFICE_HOURS
+        return MSG_ASK_OFFICE_HOURS
+
+    elif state == ONBOARDING_OFFICE_HOURS:
+        try:
+            hours = parse_office_hours(user_text)
+        except ValueError:
+            return "I could not parse that. Please use a format like '9am to 6pm' or '09:00-18:00'."
+        session["ctx"]["office_hours"] = hours
+        session["state"] = ONBOARDING_WORKING_DAYS
+        return MSG_ASK_WORKING_DAYS
+
+    elif state == ONBOARDING_WORKING_DAYS:
+        try:
+            days = parse_working_days(user_text)
+        except ValueError:
+            return "I could not parse that. Try 'Mon to Fri' or 'Monday, Tuesday, Wednesday, Thursday, Friday'."
+        if not days:
+            days = DEFAULT_WORKING_DAYS
+        session["ctx"]["working_days"] = days
+        session["state"] = ONBOARDING_COMPLETE
+        save_session(chat_id, session)
+        return await trigger_google_auth(chat_id, session)
+
+    elif state == ONBOARDING_GOOGLE_CODE:
+        code = user_text.strip()
+        try:
+            _exchange_code(chat_id, code)
+            session["ctx"]["google_authed"] = True
+            session["state"] = IDLE
+            save_session(chat_id, session)
+            return "Google Calendar connected successfully!\n\n" + MSG_READY
+        except Exception as exc:
+            logger.error("OAuth code exchange failed: %s", exc)
+            return (
+                "That code did not work. Please try the link again or type /start to restart.\n"
+                f"Error: {exc}"
+            )
+
+    elif state == ONBOARDING_COMPLETE:
+        # User sent a message while we're still in COMPLETE — re-trigger auth
+        return await trigger_google_auth(chat_id, session)
+
+    return "Something went wrong. Type /start to begin again."
+
+
+async def trigger_google_auth(chat_id: int, session: dict) -> str:
+    """Generate the Google OAuth URL and send instructions to the user via the return value."""
+    try:
+        auth_url = _build_auth_url(chat_id)
+        session["state"] = ONBOARDING_GOOGLE_CODE
+        save_session(chat_id, session)
+        return (
+            "Almost there! I need access to your Google Calendar.\n\n"
+            f"1. Open this link:\n{auth_url}\n\n"
+            "2. Sign in and click Allow.\n"
+            "3. Google will show you a code — paste it here."
+        )
+    except FileNotFoundError as exc:
+        logger.error("credentials.json missing: %s", exc)
+        return (
+            "Setup incomplete: credentials.json is missing.\n\n"
+            "To fix:\n"
+            "1. Go to console.cloud.google.com\n"
+            "2. Create a project, enable Google Calendar API\n"
+            "3. Create OAuth 2.0 credentials (Desktop app type)\n"
+            "4. Download as credentials.json and place it in the bot folder\n"
+            "5. Type /start to try again."
+        )
+    except Exception as exc:
+        logger.exception("Failed to build auth URL: %s", exc)
+        return "Could not start Google auth. Type /start to try again."

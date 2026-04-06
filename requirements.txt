@@ -1,0 +1,24 @@
+# Calendar Booking Agent — Python Dependencies
+
+# Telegram bot framework (async, polling mode)
+python-telegram-bot==21.6
+
+# Anthropic Claude API SDK
+anthropic>=0.40.0
+
+# Environment variable loading
+python-dotenv==1.0.1
+
+# Timezone handling (IANA timezone database)
+pytz==2024.1
+
+# Date/time parsing for natural language office hours input
+python-dateutil==2.9.0
+
+# HTTP client (used by anthropic SDK, included explicitly for clarity)
+httpx>=0.27.0
+
+# Google Calendar API + OAuth
+google-auth>=2.29.0
+google-auth-oauthlib>=1.2.0
+google-api-python-client>=2.130.0
