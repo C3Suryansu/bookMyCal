@@ -1,6 +1,7 @@
 import json
 import logging
 from datetime import datetime, timezone
+import re
 
 import anthropic
 from googleapiclient.discovery import build
@@ -379,7 +380,23 @@ async def _dispatch_tool(chat_id: int, tool_name: str, tool_input: dict) -> str:
 # ---------------------------------------------------------------------------
 
 def _make_client(api_key: str) -> anthropic.AsyncAnthropic:
-    return anthropic.AsyncAnthropic(api_key=api_key)
+    return anthropic.AsyncAnthropic(
+        api_key=api_key,
+        max_retries=1,
+        timeout=12.0,
+    )
+
+
+def _normalize_content_blocks(content) -> list:
+    normalized = []
+    for block in content or []:
+        if hasattr(block, "model_dump"):
+            normalized.append(block.model_dump(mode="json", exclude_none=True))
+        elif isinstance(block, dict):
+            normalized.append(block)
+        else:
+            normalized.append(block)
+    return normalized
 
 
 def extract_text_reply(response) -> str:
@@ -410,11 +427,89 @@ def _infer_state_from_reply(reply: str) -> str | None:
     return None
 
 
+def _format_ist(dt_str: str | None) -> str:
+    if not dt_str:
+        return "unknown time"
+    try:
+        dt = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
+        ist = dt.astimezone(__import__("pytz").timezone("Asia/Kolkata"))
+        return ist.strftime("%-I:%M %p IST")
+    except Exception:
+        return dt_str
+
+
+def _tool_fallback_reply(tool_name: str, result_json: str) -> str | None:
+    try:
+        result = json.loads(result_json)
+    except Exception:
+        return None
+
+    if tool_name == "calendar_events_list":
+        events = result.get("events", [])
+        if not events:
+            return "Your calendar looks free for that time range."
+        lines = ["Here’s your calendar for that period:"]
+        for idx, event in enumerate(events[:6], start=1):
+            lines.append(
+                f"{idx}. {event.get('summary', '(no title)')} — "
+                f"{_format_ist(event.get('start'))} to {_format_ist(event.get('end'))}"
+            )
+        if len(events) > 6:
+            lines.append(f"And {len(events) - 6} more events.")
+        return "\n".join(lines)
+
+    if tool_name == "lookup_person":
+        if result.get("error"):
+            return "I couldn’t look that person up right now."
+        matches = result.get("matches", [])
+        if not matches:
+            return "I couldn’t find anyone matching that name."
+        if len(matches) == 1:
+            match = matches[0]
+            return f"Found {match.get('name', 'that person')} — {match.get('email', 'unknown email')}."
+        lines = ["Found a few matches:"]
+        for idx, match in enumerate(matches[:5], start=1):
+            lines.append(f"{idx}. {match.get('name', 'Unknown')} — {match.get('email', 'unknown')}")
+        return "\n".join(lines)
+
+    if tool_name == "calendar_events_create":
+        return (
+            f"Booked. Event created: {result.get('summary', '(no title)')}. "
+            f"{'Meet link: ' + result['meetLink'] if result.get('meetLink') else ''}".strip()
+        )
+
+    return None
+
+
+async def _synthesize_tool_reply(
+    client: anthropic.AsyncAnthropic,
+    system_prompt: str,
+    user_message: str,
+    tool_results: list[dict],
+) -> str:
+    synthesis_lines = [
+        f"Original user request: {user_message}",
+        "Tool results:",
+    ]
+    for item in tool_results:
+        synthesis_lines.append(json.dumps(item, ensure_ascii=False))
+    synthesis_lines.append(
+        "Using only these tool results, answer the user directly in plain concise text."
+    )
+    response = await client.messages.create(
+        model=ANTHROPIC_MODEL,
+        max_tokens=512,
+        system=system_prompt,
+        messages=[{"role": "user", "content": "\n".join(synthesis_lines)}],
+    )
+    return extract_text_reply(response)
+
+
 # ---------------------------------------------------------------------------
 # Main agent loop
 # ---------------------------------------------------------------------------
 
-async def run_agent_turn(session: dict, user_message: str, chat_id: int) -> str:
+async def run_agent_turn(session: dict, user_message: str, chat_id: int | str) -> str:
     api_key = session["ctx"].get("anthropic_api_key")
     if not api_key:
         return "No API key found. Please type /start to set up your account."
@@ -464,10 +559,14 @@ async def run_agent_turn(session: dict, user_message: str, chat_id: int) -> str:
         while response.stop_reason == "tool_use":
             # Collect all tool calls from this response
             tool_results = []
+            last_tool_name = None
+            last_result_json = None
             for block in response.content:
                 if hasattr(block, "type") and block.type == "tool_use":
                     logger.info("Tool call: %s input=%s", block.name, block.input)
                     result_json = await _dispatch_tool(chat_id, block.name, block.input)
+                    last_tool_name = block.name
+                    last_result_json = result_json
                     tool_results.append({
                         "type": "tool_result",
                         "tool_use_id": block.id,
@@ -475,18 +574,58 @@ async def run_agent_turn(session: dict, user_message: str, chat_id: int) -> str:
                     })
 
             # Append assistant turn (with tool_use blocks) then tool results
-            append_message(session, "assistant", response.content)
+            append_message(session, "assistant", _normalize_content_blocks(response.content))
             append_message(session, "user", tool_results)
 
-            response = await client.messages.create(
-                model=ANTHROPIC_MODEL,
-                max_tokens=1024,
-                system=SYSTEM_PROMPT + context_note,
-                messages=session["messages"],
-                tools=ALL_TOOLS,
-            )
+            try:
+                response = await client.messages.create(
+                    model=ANTHROPIC_MODEL,
+                    max_tokens=1024,
+                    system=SYSTEM_PROMPT + context_note,
+                    messages=session["messages"],
+                    tools=ALL_TOOLS,
+                )
+            except Exception as exc:
+                logger.warning("Falling back to Claude synthesis after tool execution error: %s", exc)
+                try:
+                    synthesized = await _synthesize_tool_reply(
+                        client,
+                        SYSTEM_PROMPT + context_note,
+                        user_message,
+                        tool_results,
+                    )
+                    if synthesized:
+                        append_message(session, "assistant", synthesized)
+                        save_session(chat_id, session)
+                        return synthesized
+                except Exception as synth_exc:
+                    logger.warning("Claude synthesis fallback failed: %s", synth_exc)
+                fallback = (
+                    _tool_fallback_reply(last_tool_name, last_result_json)
+                    if last_tool_name and last_result_json
+                    else None
+                )
+                if fallback:
+                    append_message(session, "assistant", fallback)
+                    save_session(chat_id, session)
+                    return fallback
+                raise
 
         reply_text = extract_text_reply(response)
+        if not reply_text and 'tool_results' in locals() and tool_results:
+            try:
+                reply_text = await _synthesize_tool_reply(
+                    client,
+                    SYSTEM_PROMPT + context_note,
+                    user_message,
+                    tool_results,
+                )
+            except Exception as synth_exc:
+                logger.warning("Claude synthesis fallback failed: %s", synth_exc)
+        if not reply_text and 'last_tool_name' in locals() and 'last_result_json' in locals():
+            fallback = _tool_fallback_reply(last_tool_name, last_result_json) if last_tool_name and last_result_json else None
+            if fallback:
+                reply_text = fallback
         append_message(session, "assistant", reply_text)
 
         new_state = _infer_state_from_reply(reply_text)
