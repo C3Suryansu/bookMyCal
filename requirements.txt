@@ -22,3 +22,9 @@ httpx>=0.27.0
 google-auth>=2.29.0
 google-auth-oauthlib>=1.2.0
 google-api-python-client>=2.130.0
+
+# WhatsApp MCP bridge (Model Context Protocol Python SDK)
+mcp>=1.0.0
+
+# Slack integration (Bolt SDK — async, Socket Mode)
+slack-bolt>=1.18

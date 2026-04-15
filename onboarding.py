@@ -1,8 +1,10 @@
 import logging
 import os
+import shutil
 
 import anthropic
 import httpx
+from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 
@@ -12,6 +14,7 @@ from prompts import (
     MSG_ASK_EMAIL,
     MSG_ASK_OFFICE_HOURS,
     MSG_ASK_WORKING_DAYS,
+    MSG_ONBOARDING_START,
     MSG_READY,
 )
 from session import (
@@ -23,6 +26,7 @@ from session import (
     ONBOARDING_GOOGLE_CODE,
     ONBOARDING_OFFICE_HOURS,
     ONBOARDING_WORKING_DAYS,
+    sanitize_chat_id,
     save_session,
 )
 
@@ -32,13 +36,13 @@ logger = logging.getLogger(__name__)
 # GitHub token persistence helpers
 # ---------------------------------------------------------------------------
 
-def _github_token_path(chat_id: int) -> str:
+def _github_token_path(chat_id: int | str) -> str:
     """Return the file path where a user's GitHub PAT is stored."""
     os.makedirs(GITHUB_TOKEN_DIR, exist_ok=True)
-    return os.path.join(GITHUB_TOKEN_DIR, f"{chat_id}.txt")
+    return os.path.join(GITHUB_TOKEN_DIR, f"{sanitize_chat_id(chat_id)}.txt")
 
 
-def load_github_token(chat_id: int) -> str | None:
+def load_github_token(chat_id: int | str) -> str | None:
     """Read a persisted GitHub PAT from disk. Returns None if not found."""
     path = _github_token_path(chat_id)
     if not os.path.exists(path):
@@ -77,7 +81,7 @@ async def _validate_github_token(token: str) -> tuple[bool, str]:
         return False, ""
 
 
-async def trigger_github_setup(chat_id: int, session: dict) -> str:
+async def trigger_github_setup(chat_id: int | str, session: dict) -> str:
     """
     Set the session state to ONBOARDING_GITHUB_PAT and return instructions
     asking the user to paste their Personal Access Token.
@@ -95,6 +99,20 @@ async def trigger_github_setup(chat_id: int, session: dict) -> str:
     )
 
 
+def start_for_new_user(chat_id: int | str, session: dict) -> str:
+    """
+    Entry point for a first-time WhatsApp user.
+
+    If the session is already fully configured (bootstrapped from env vars),
+    returns MSG_READY so the bot falls through and processes the user's message.
+    Otherwise returns MSG_ONBOARDING_START and leaves the session in
+    ONBOARDING_API_KEY state (already set by _new_session).
+    """
+    if session["state"] == IDLE:
+        return MSG_READY
+    return MSG_ONBOARDING_START
+
+
 GOOGLE_SCOPES = [
     "https://www.googleapis.com/auth/calendar",
     "https://www.googleapis.com/auth/calendar.events",
@@ -106,18 +124,69 @@ CREDENTIALS_FILE = os.path.join(os.path.dirname(__file__), "credentials.json")
 TOKEN_DIR = os.path.join(os.path.dirname(__file__), ".google_tokens")
 
 # Holds the active OAuth Flow per chat_id while awaiting the code
-_pending_flows: dict[int, Flow] = {}
+_pending_flows: dict[int | str, Flow] = {}
 
 
-def _token_path(chat_id: int) -> str:
+def _configured_token_path() -> str | None:
+    raw = os.getenv("GOOGLE_TOKEN_PATH", "").strip()
+    if not raw:
+        return None
+    if os.path.isabs(raw):
+        return raw
+    return os.path.join(os.path.dirname(__file__), raw)
+
+
+def _token_path(chat_id: int | str) -> str:
+    configured = _configured_token_path()
+    if configured:
+        os.makedirs(os.path.dirname(configured), exist_ok=True)
+        return configured
     os.makedirs(TOKEN_DIR, exist_ok=True)
-    return os.path.join(TOKEN_DIR, f"{chat_id}.json")
+    return os.path.join(TOKEN_DIR, f"{sanitize_chat_id(chat_id)}.json")
+
+
+def _legacy_token_path(chat_id: int | str) -> str:
+    os.makedirs(TOKEN_DIR, exist_ok=True)
+    return os.path.join(TOKEN_DIR, f"{sanitize_chat_id(chat_id)}.json")
+
+
+def _seed_shared_token_from_existing(chat_id: int | str) -> None:
+    configured = _configured_token_path()
+    if not configured or os.path.exists(configured):
+        return
+
+    candidates: list[str] = []
+    legacy_for_chat = _legacy_token_path(chat_id)
+    if os.path.exists(legacy_for_chat):
+        candidates.append(legacy_for_chat)
+
+    token_files = sorted(
+        (
+            os.path.join(TOKEN_DIR, name)
+            for name in os.listdir(TOKEN_DIR)
+            if name.endswith(".json")
+        ),
+        key=lambda path: os.path.getmtime(path),
+        reverse=True,
+    ) if os.path.isdir(TOKEN_DIR) else []
+
+    for path in token_files:
+        if path not in candidates:
+            candidates.append(path)
+
+    if candidates:
+        shutil.copyfile(candidates[0], configured)
+        logger.info("Seeded shared Google token path %s from %s", configured, candidates[0])
 
 
 async def _validate_api_key(api_key: str) -> bool:
     """Make a minimal test API call to validate the key."""
     try:
-        client = anthropic.AsyncAnthropic(api_key=api_key)
+        client = anthropic.AsyncAnthropic(
+            api_key=api_key,
+            max_retries=1,
+            timeout=15.0,
+        )
         await client.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=1,
@@ -131,7 +200,7 @@ async def _validate_api_key(api_key: str) -> bool:
         return False
 
 
-def _build_auth_url(chat_id: int) -> str:
+def _build_auth_url(chat_id: int | str) -> str:
     """Create a Google OAuth flow and return the authorization URL."""
     if not os.path.exists(CREDENTIALS_FILE):
         raise FileNotFoundError(
@@ -148,36 +217,45 @@ def _build_auth_url(chat_id: int) -> str:
         prompt="consent",
         include_granted_scopes="true",
     )
-    _pending_flows[chat_id] = flow
+    _pending_flows[sanitize_chat_id(chat_id)] = flow
     return auth_url
 
 
-def _exchange_code(chat_id: int, code: str) -> Credentials:
+def _exchange_code(chat_id: int | str, code: str) -> Credentials:
     """Exchange the authorization code for credentials and save them."""
-    flow = _pending_flows.get(chat_id)
+    flow = _pending_flows.get(sanitize_chat_id(chat_id))
     if not flow:
         raise ValueError("No pending OAuth flow found. Please type /start to begin again.")
     flow.fetch_token(code=code.strip())
     creds = flow.credentials
     with open(_token_path(chat_id), "w") as f:
         f.write(creds.to_json())
-    del _pending_flows[chat_id]
+    del _pending_flows[sanitize_chat_id(chat_id)]
     return creds
 
 
-def load_credentials(chat_id: int) -> Credentials | None:
+def load_credentials(chat_id: int | str) -> Credentials | None:
     """Load saved Google credentials for a chat_id, or None if not found."""
+    _seed_shared_token_from_existing(chat_id)
     path = _token_path(chat_id)
     if not os.path.exists(path):
         return None
     try:
-        return Credentials.from_authorized_user_file(path, GOOGLE_SCOPES)
+        creds = Credentials.from_authorized_user_file(path, GOOGLE_SCOPES)
+        if creds.expired and creds.refresh_token:
+            try:
+                creds.refresh(Request())
+                with open(path, "w") as f:
+                    f.write(creds.to_json())
+            except Exception as exc:
+                logger.warning("Could not refresh credentials for %s: %s", chat_id, exc)
+        return creds
     except Exception as exc:
         logger.warning("Could not load credentials for %s: %s", chat_id, exc)
         return None
 
 
-async def handle_onboarding_step(session: dict, user_text: str, chat_id: int) -> str:
+async def handle_onboarding_step(session: dict, user_text: str, chat_id: int | str) -> str:
     """
     Route the user's message through the onboarding FSM.
     Mutates session state in place.
@@ -267,7 +345,7 @@ async def handle_onboarding_step(session: dict, user_text: str, chat_id: int) ->
     return "Something went wrong. Type /start to begin again."
 
 
-async def trigger_google_auth(chat_id: int, session: dict) -> str:
+async def trigger_google_auth(chat_id: int | str, session: dict) -> str:
     """Generate the Google OAuth URL and send instructions to the user via the return value."""
     try:
         auth_url = _build_auth_url(chat_id)

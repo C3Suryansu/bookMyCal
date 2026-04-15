@@ -17,7 +17,47 @@ AWAITING_CONFIRM = "AWAITING_CONFIRM"
 FALLBACK_DECIDE = "FALLBACK_DECIDE"
 BOOKED = "BOOKED"
 
+def sanitize_chat_id(chat_id: int | str) -> str:
+    """Return a filesystem-safe string from any chat_id type.
+
+    Strips '@s.whatsapp.net' and leading '+' so WhatsApp JIDs become
+    plain digit strings. Telegram integer IDs are simply stringified.
+    """
+    s = str(chat_id)
+    if "@" in s:
+        s = s.split("@")[0]
+    s = s.lstrip("+")
+    return s
+
+
 _sessions: dict = {}
+
+
+def _configured_google_token_path() -> str | None:
+    raw = os.getenv("GOOGLE_TOKEN_PATH", "").strip()
+    if not raw:
+        return None
+    if os.path.isabs(raw):
+        return raw
+    return os.path.join(os.path.dirname(__file__), raw)
+
+
+def _google_token_available(chat_id: int | str) -> bool:
+    configured = _configured_google_token_path()
+    if configured and os.path.exists(configured):
+        return True
+
+    chat_path = os.path.join(
+        os.path.dirname(__file__), ".google_tokens", f"{sanitize_chat_id(chat_id)}.json"
+    )
+    if os.path.exists(chat_path):
+        return True
+
+    token_dir = os.path.join(os.path.dirname(__file__), ".google_tokens")
+    if os.path.isdir(token_dir):
+        return any(name.endswith(".json") for name in os.listdir(token_dir))
+
+    return False
 
 
 def _new_session() -> dict:
@@ -48,7 +88,7 @@ def _new_session() -> dict:
             "proposed_slots": [],
             "chosen_slot": None,
             "delta_tried": [],
-            "google_authed": fully_configured,
+            "google_authed": False,
             "github_token": os.getenv("GITHUB_TOKEN"),
             "github_username": os.getenv("GITHUB_USERNAME"),
             "github_authed": bool(os.getenv("GITHUB_TOKEN")),
@@ -57,13 +97,14 @@ def _new_session() -> dict:
     }
 
 
-def get_session(chat_id: int) -> dict:
-    if chat_id not in _sessions:
+def get_session(chat_id: int | str) -> dict:
+    key = sanitize_chat_id(chat_id)
+    if key not in _sessions:
         session = _new_session()
         # Load persisted GitHub token if env var is not set
         if not os.getenv("GITHUB_TOKEN"):
             token_file = os.path.join(
-                os.path.dirname(__file__), ".github_tokens", f"{chat_id}.txt"
+                os.path.dirname(__file__), ".github_tokens", f"{key}.txt"
             )
             if os.path.exists(token_file):
                 try:
@@ -74,18 +115,20 @@ def get_session(chat_id: int) -> dict:
                         session["ctx"]["github_authed"] = True
                 except Exception:
                     pass
-        _sessions[chat_id] = session
-    return _sessions[chat_id]
+        _sessions[key] = session
+    _sessions[key]["ctx"]["google_authed"] = _google_token_available(chat_id)
+    return _sessions[key]
 
 
-def save_session(chat_id: int, session: dict) -> None:
-    _sessions[chat_id] = session
+def save_session(chat_id: int | str, session: dict) -> None:
+    _sessions[sanitize_chat_id(chat_id)] = session
 
 
-def reset_session(chat_id: int) -> dict:
+def reset_session(chat_id: int | str) -> dict:
     """Full reset — re-runs onboarding."""
-    _sessions[chat_id] = _new_session()
-    return _sessions[chat_id]
+    key = sanitize_chat_id(chat_id)
+    _sessions[key] = _new_session()
+    return _sessions[key]
 
 
 def reset_booking_ctx(session: dict) -> None:
