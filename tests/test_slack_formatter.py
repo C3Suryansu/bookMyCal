@@ -4,7 +4,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from slack_formatter import format_reply
+from transports.slack_formatter import format_reply
 
 
 def test_slot_list_returns_button_block():

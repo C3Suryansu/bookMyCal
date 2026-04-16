@@ -3,7 +3,7 @@ import sys
 import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from session import get_session, save_session, reset_session, sanitize_chat_id
+from core.session import get_session, save_session, reset_session, sanitize_chat_id
 
 
 def test_sanitize_removes_domain():
@@ -38,7 +38,7 @@ def test_reset_session_accepts_string_jid():
 def test_get_session_same_jid_forms_return_same_session():
     """Different JID forms for the same user return the same session object."""
     # Ensure clean slate
-    from session import _sessions
+    from core.session import _sessions
     for k in list(_sessions.keys()):
         if "987654" in str(k):
             del _sessions[k]
@@ -50,9 +50,9 @@ def test_get_session_same_jid_forms_return_same_session():
 
 def test_start_for_new_user_fully_configured():
     """When env vars set session to IDLE, returns MSG_READY without changing state."""
-    from onboarding import start_for_new_user
-    from session import IDLE
-    from prompts import MSG_READY
+    from core.onboarding import start_for_new_user
+    from core.session import IDLE
+    from core.prompts import MSG_READY
 
     session = {"state": IDLE, "ctx": {"anthropic_api_key": "sk-ant-x"}}
     result = start_for_new_user("919876543210@s.whatsapp.net", session)
@@ -62,9 +62,9 @@ def test_start_for_new_user_fully_configured():
 
 def test_start_for_new_user_needs_onboarding():
     """When session is not configured, sets state and returns onboarding start message."""
-    from onboarding import start_for_new_user
-    from session import ONBOARDING_API_KEY
-    from prompts import MSG_ONBOARDING_START
+    from core.onboarding import start_for_new_user
+    from core.session import ONBOARDING_API_KEY
+    from core.prompts import MSG_ONBOARDING_START
 
     session = {"state": ONBOARDING_API_KEY, "ctx": {}}
     result = start_for_new_user("919876543210@s.whatsapp.net", session)

@@ -3,7 +3,7 @@ import pytest
 import respx
 from httpx import Response
 
-from github_tools import _list_branches
+from tools.github_tools import _list_branches
 
 GITHUB_API_BASE = "https://api.github.com"
 
@@ -36,7 +36,7 @@ async def test_list_branches_empty_repo():
     assert result == []
 
 
-from github_tools import _execute_github_create_pr
+from tools.github_tools import _execute_github_create_pr
 
 
 @pytest.mark.asyncio
@@ -89,7 +89,7 @@ async def test_create_pr_422_existing_pr(mock_auth, mock_resolve_repo):
 # Task 4: github_pr_submit_review
 # ---------------------------------------------------------------------------
 
-from github_tools import _execute_github_pr_submit_review
+from tools.github_tools import _execute_github_pr_submit_review
 
 
 @pytest.mark.asyncio
@@ -144,7 +144,7 @@ async def test_submit_review_request_changes(mock_auth, mock_resolve_repo):
 # Task 5: github_pr_comment
 # ---------------------------------------------------------------------------
 
-from github_tools import _execute_github_pr_comment
+from tools.github_tools import _execute_github_pr_comment
 
 
 @pytest.mark.asyncio
@@ -192,7 +192,7 @@ async def test_pr_comment_sends_body(mock_auth, mock_resolve_repo):
 # Task 6: github_pr_merge
 # ---------------------------------------------------------------------------
 
-from github_tools import _execute_github_pr_merge
+from tools.github_tools import _execute_github_pr_merge
 
 
 @pytest.mark.asyncio
@@ -251,7 +251,7 @@ async def test_pr_merge_default_method_is_squash(mock_auth, mock_resolve_repo):
 # Task 7: github_pr_close
 # ---------------------------------------------------------------------------
 
-from github_tools import _execute_github_pr_close
+from tools.github_tools import _execute_github_pr_close
 
 
 @pytest.mark.asyncio
@@ -294,7 +294,7 @@ async def test_pr_close_sends_state_closed(mock_auth, mock_resolve_repo):
 # Task 8: github_pr_request_reviewers
 # ---------------------------------------------------------------------------
 
-from github_tools import _execute_github_pr_request_reviewers
+from tools.github_tools import _execute_github_pr_request_reviewers
 
 
 @pytest.mark.asyncio
@@ -341,7 +341,7 @@ async def test_request_reviewers_404_not_collaborator(mock_auth, mock_resolve_re
 # Task 9: github_pr_set_labels
 # ---------------------------------------------------------------------------
 
-from github_tools import _execute_github_pr_set_labels
+from tools.github_tools import _execute_github_pr_set_labels
 
 
 @pytest.mark.asyncio

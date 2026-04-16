@@ -5,8 +5,8 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from whatsapp_bot import _github_setup_requested
-from session import IDLE, ONBOARDING_API_KEY
+from transports.whatsapp import _github_setup_requested
+from core.session import IDLE, ONBOARDING_API_KEY
 
 
 def _idle_session():

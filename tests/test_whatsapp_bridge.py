@@ -5,7 +5,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from whatsapp_bridge import WhatsAppBridge
+from transports.whatsapp_bridge import WhatsAppBridge
 
 
 @pytest.fixture
