@@ -12,14 +12,14 @@ from urllib.parse import quote
 
 import httpx
 
-from github_utils import (
+from tools.github_utils import (
     age_in_days,
     compress_issue,
     compress_pr,
     compress_review_threads,
     get_github_headers,
 )
-from session import get_session, save_session
+from core.session import get_session, save_session
 
 logger = logging.getLogger(__name__)
 
