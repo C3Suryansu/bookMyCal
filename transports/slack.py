@@ -8,10 +8,10 @@ from dotenv import load_dotenv
 from slack_bolt.async_app import AsyncApp
 from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 
-from agent import run_agent_turn
-from onboarding import handle_onboarding_step, start_for_new_user, trigger_github_setup
-from session import BOOKED, get_session, reset_booking_ctx, save_session
-from slack_formatter import format_reply
+from core.agent import run_agent_turn
+from core.onboarding import handle_onboarding_step, start_for_new_user, trigger_github_setup
+from core.session import BOOKED, get_session, reset_booking_ctx, save_session
+from transports.slack_formatter import format_reply
 
 load_dotenv()
 logging.basicConfig(

@@ -5,10 +5,10 @@ from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
-from agent import run_agent_turn
-from onboarding import handle_onboarding_step, trigger_github_setup, trigger_google_auth
-from prompts import MSG_ONBOARDING_START, MSG_READY
-from session import (
+from core.agent import run_agent_turn
+from core.onboarding import handle_onboarding_step, trigger_github_setup, trigger_google_auth
+from core.prompts import MSG_ONBOARDING_START, MSG_READY
+from core.session import (
     BOOKED,
     IDLE,
     ONBOARDING_GITHUB_PAT,
@@ -16,10 +16,13 @@ from session import (
     reset_booking_ctx,
     reset_github_ctx,
     reset_session,
+    sanitize_chat_id,
     save_session,
 )
 
 load_dotenv()
+
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -67,7 +70,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_reauth(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Delete saved Google token and re-run OAuth flow."""
     chat_id = update.effective_chat.id
-    token_path = os.path.join(os.path.dirname(__file__), ".google_tokens", f"{chat_id}.json")
+    token_path = os.path.join(_ROOT, ".google_tokens", f"{sanitize_chat_id(chat_id)}.json")
     if os.path.exists(token_path):
         os.remove(token_path)
 

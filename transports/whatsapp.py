@@ -9,10 +9,10 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from agent import run_agent_turn
-from onboarding import handle_onboarding_step, start_for_new_user, trigger_github_setup
-from session import BOOKED, _sessions, get_session, reset_booking_ctx, save_session
-from whatsapp_bridge import WhatsAppBridge
+from core.agent import run_agent_turn
+from core.onboarding import handle_onboarding_step, start_for_new_user, trigger_github_setup
+from core.session import BOOKED, _sessions, get_session, reset_booking_ctx, save_session
+from transports.whatsapp_bridge import WhatsAppBridge
 
 load_dotenv()
 logging.basicConfig(
