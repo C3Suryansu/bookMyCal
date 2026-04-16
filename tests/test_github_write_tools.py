@@ -1,4 +1,4 @@
-# calendar-agent/tests/test_github_write_tools.py
+# tests/test_github_write_tools.py
 import pytest
 import respx
 from httpx import Response

@@ -1,4 +1,4 @@
-# slack_bot.py
+# slack.py
 import asyncio
 import logging
 import os

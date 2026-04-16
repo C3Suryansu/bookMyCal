@@ -1,4 +1,4 @@
-# whatsapp_bot.py
+# whatsapp.py
 import asyncio
 import logging
 import os
