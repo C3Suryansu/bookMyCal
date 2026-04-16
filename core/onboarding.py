@@ -30,6 +30,8 @@ from core.session import (
     save_session,
 )
 
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -120,7 +122,6 @@ GOOGLE_SCOPES = [
     "https://www.googleapis.com/auth/contacts.readonly",        # saved contacts
     "https://www.googleapis.com/auth/contacts.other.readonly",  # people you've emailed/met
 ]
-_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 CREDENTIALS_FILE = os.path.join(_ROOT, "credentials.json")
 TOKEN_DIR = os.path.join(_ROOT, ".google_tokens")
