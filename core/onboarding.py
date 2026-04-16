@@ -8,16 +8,16 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 
-from calendar_utils import parse_office_hours, parse_working_days
+from tools.calendar import parse_office_hours, parse_working_days
 from config import DEFAULT_WORKING_DAYS, GITHUB_TOKEN_DIR
-from prompts import (
+from core.prompts import (
     MSG_ASK_EMAIL,
     MSG_ASK_OFFICE_HOURS,
     MSG_ASK_WORKING_DAYS,
     MSG_ONBOARDING_START,
     MSG_READY,
 )
-from session import (
+from core.session import (
     IDLE,
     ONBOARDING_API_KEY,
     ONBOARDING_COMPLETE,
@@ -120,8 +120,10 @@ GOOGLE_SCOPES = [
     "https://www.googleapis.com/auth/contacts.readonly",        # saved contacts
     "https://www.googleapis.com/auth/contacts.other.readonly",  # people you've emailed/met
 ]
-CREDENTIALS_FILE = os.path.join(os.path.dirname(__file__), "credentials.json")
-TOKEN_DIR = os.path.join(os.path.dirname(__file__), ".google_tokens")
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+CREDENTIALS_FILE = os.path.join(_ROOT, "credentials.json")
+TOKEN_DIR = os.path.join(_ROOT, ".google_tokens")
 
 # Holds the active OAuth Flow per chat_id while awaiting the code
 _pending_flows: dict[int | str, Flow] = {}
@@ -133,7 +135,7 @@ def _configured_token_path() -> str | None:
         return None
     if os.path.isabs(raw):
         return raw
-    return os.path.join(os.path.dirname(__file__), raw)
+    return os.path.join(_ROOT, raw)
 
 
 def _token_path(chat_id: int | str) -> str:

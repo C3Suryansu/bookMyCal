@@ -8,10 +8,10 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 from config import ANTHROPIC_MODEL
-from github_tools import GITHUB_TOOLS, dispatch_github_tool
-from onboarding import load_credentials
-from prompts import SYSTEM_PROMPT
-from session import (
+from tools.github_tools import GITHUB_TOOLS, dispatch_github_tool
+from core.onboarding import load_credentials
+from core.prompts import SYSTEM_PROMPT
+from core.session import (
     AWAITING_CHOICE,
     AWAITING_CONFIRM,
     BOOKED,

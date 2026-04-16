@@ -2,6 +2,8 @@ import os
 
 from config import DEFAULT_OFFICE_START, DEFAULT_OFFICE_END
 
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 # FSM States
 ONBOARDING_API_KEY = "ONBOARDING_API_KEY"
 ONBOARDING_EMAIL = "ONBOARDING_EMAIL"
@@ -39,7 +41,7 @@ def _configured_google_token_path() -> str | None:
         return None
     if os.path.isabs(raw):
         return raw
-    return os.path.join(os.path.dirname(__file__), raw)
+    return os.path.join(_ROOT, raw)
 
 
 def _google_token_available(chat_id: int | str) -> bool:
@@ -48,12 +50,12 @@ def _google_token_available(chat_id: int | str) -> bool:
         return True
 
     chat_path = os.path.join(
-        os.path.dirname(__file__), ".google_tokens", f"{sanitize_chat_id(chat_id)}.json"
+        _ROOT, ".google_tokens", f"{sanitize_chat_id(chat_id)}.json"
     )
     if os.path.exists(chat_path):
         return True
 
-    token_dir = os.path.join(os.path.dirname(__file__), ".google_tokens")
+    token_dir = os.path.join(_ROOT, ".google_tokens")
     if os.path.isdir(token_dir):
         return any(name.endswith(".json") for name in os.listdir(token_dir))
 
@@ -104,7 +106,7 @@ def get_session(chat_id: int | str) -> dict:
         # Load persisted GitHub token if env var is not set
         if not os.getenv("GITHUB_TOKEN"):
             token_file = os.path.join(
-                os.path.dirname(__file__), ".github_tokens", f"{key}.txt"
+                _ROOT, ".github_tokens", f"{key}.txt"
             )
             if os.path.exists(token_file):
                 try:
